@@ -183,6 +183,19 @@ class RovioNode{
   std::string camera_frame_;
   std::string imu_frame_;
 
+  //CUSTOMIZATION
+  double imu_offset_ = 0.0;                     //time offset added to IMU messages to sync with camera images
+  double cam0_offset_ = 0.0;                    //time offset added to camera 0 messages to sync with IMU images
+  double cam1_offset_ = 0.0;                    //time offset added to camera 1 messages to sync with IMU images
+  double cam2_offset_ = 0.0;                    //time offset added to camera 2 messages to sync with IMU images
+  bool resize_input_image_ = false;             //should input images be resized? typically for larger input images to be scaled down - CAMERA INTRINSICS NOT SCALED ACCORDINGLY CHECK CALIBRATION FILE
+  double resize_factor_ = 0.5;                  //factor by which input images should be rescaled cannot be greater than 1.0 - CAMERA INTRINSICS NOT SCALED ACCORDINGLY CHECK CALIBRATION FILE
+  bool histogram_equalize_8bit_images_ = false; //use CLAHE to histogram equalize input intensity images, only for 8-bit images. 16-bit image equalization for feature detection does not require this to be on.
+  cv::Ptr<cv::CLAHE> clahe;
+  double clahe_clip_limit_ = 4.0;               //number of pixels used to clip the CDF for histogram equalization
+  double clahe_grid_size_ = 8;                  //clahe_grid_size_ x clahe_grid_size_ pixel neighborhood used
+  //CUSTOMIZATION
+
   /** \brief Constructor
    */
   RovioNode(ros::NodeHandle& nh, ros::NodeHandle& nh_private, std::shared_ptr<mtFilter> mpFilter)
@@ -239,6 +252,26 @@ class RovioNode{
     nh_private_.param("world_frame", world_frame_, world_frame_);
     nh_private_.param("camera_frame", camera_frame_, camera_frame_);
     nh_private_.param("imu_frame", imu_frame_, imu_frame_);
+
+    //CUSTOMIZATION
+    nh_private_.param("imu_offset", imu_offset_, 0.0);
+    nh_private_.param("cam0_offset", cam0_offset_, 0.0);
+    nh_private_.param("cam1_offset", cam1_offset_, 0.0);
+    nh_private_.param("cam2_offset", cam2_offset_, 0.0);
+    nh_private_.param("histogram_equalize_8bit_images", histogram_equalize_8bit_images_, false);
+    if (histogram_equalize_8bit_images_)
+    {
+      nh_private_.param("clahe_clip_limit", clahe_clip_limit_, 4.0);
+      nh_private_.param("clahe_grid_size", clahe_grid_size_, 64.0);
+      clahe = cv::createCLAHE();
+      clahe->setClipLimit(clahe_clip_limit_);
+      clahe->setTilesGridSize(cv::Size(clahe_grid_size_, clahe_grid_size_));
+    }
+    nh_private_.param("resize_input_image", resize_input_image_, false);
+    nh_private_.param("resize_factor", resize_factor_, 0.5);
+    if (resize_factor_ > 1.0)
+      resize_factor_ = 1.0;
+    //CUSTOMIZATION
 
     // Initialize messages
     transformMsg_.header.frame_id = world_frame_;
@@ -477,6 +510,7 @@ class RovioNode{
    */
   void imgCallback0(const sensor_msgs::ImageConstPtr & img){
     std::lock_guard<std::mutex> lock(m_filter_);
+    std::cout << "imgCallback0" <<std::endl;
     imgCallback(img,0);
   }
 
@@ -487,6 +521,7 @@ class RovioNode{
    */
   void imgCallback1(const sensor_msgs::ImageConstPtr & img) {
     std::lock_guard<std::mutex> lock(m_filter_);
+    std::cout << "imgCallback1" <<std::endl;
     if(mtState::nCam_ > 1) imgCallback(img,1);
   }
 
@@ -496,55 +531,74 @@ class RovioNode{
    *   @param camID - Camera ID.
    */
   void imgCallback(const sensor_msgs::ImageConstPtr & img, const int camID = 0){
-    // Get image from msg
-    cv_bridge::CvImagePtr cv_ptr;
-    try {
-      cv_ptr = cv_bridge::toCvCopy(img, sensor_msgs::image_encodings::TYPE_8UC1);
-    } catch (cv_bridge::Exception& e) {
-      ROS_ERROR("cv_bridge exception: %s", e.what());
-      return;
-    }
-    cv::Mat cv_img;
-    cv_ptr->image.copyTo(cv_img);
-
-     //use CLAHE to histogram Equalize 8-bit intensity Images
-    bool histogram_equalize_8bit_images_ = true;
-    if (histogram_equalize_8bit_images_)
-    {
-      cv::Ptr<cv::CLAHE> clahe;
-      double clahe_clip_limit_ = 2.0;               //number of pixels used to clip the CDF for histogram equalization
-      double clahe_grid_size_ = 6;                  //clahe_grid_size_ x clahe_grid_size_ pixel neighborhood used
-      clahe = cv::createCLAHE();
-      clahe->setClipLimit(clahe_clip_limit_);
-      clahe->setTilesGridSize(cv::Size(clahe_grid_size_, clahe_grid_size_));
-      cv::Mat outImg;
-      clahe->apply(cv_img, cv_img);
-
-      // outImg.convertTo(cv_img, CV_32FC1);
-    }
-
-
-    if(init_state_.isInitialized() && !cv_img.empty()){
-      double msgTime = img->header.stamp.toSec();
-      if(msgTime != imgUpdateMeas_.template get<mtImgMeas::_aux>().imgTime_){
-        for(int i=0;i<mtState::nCam_;i++){
-          if(imgUpdateMeas_.template get<mtImgMeas::_aux>().isValidPyr_[i]){
-            std::cout << "    \033[31mFailed Synchronization of Camera Frames, t = " << msgTime << "\033[0m" << std::endl;
-          }
-        }
-        imgUpdateMeas_.template get<mtImgMeas::_aux>().reset(msgTime);
-      }
-      imgUpdateMeas_.template get<mtImgMeas::_aux>().pyr_[camID].computeFromImage(cv_img,true);
-      imgUpdateMeas_.template get<mtImgMeas::_aux>().isValidPyr_[camID] = true;
-
-      if(imgUpdateMeas_.template get<mtImgMeas::_aux>().areAllValid()){
-        mpFilter_->template addUpdateMeas<0>(imgUpdateMeas_,msgTime);
-        imgUpdateMeas_.template get<mtImgMeas::_aux>().reset(msgTime);
-        updateAndPublish();
-      }
-    }
+  // Get image from msg
+  cv_bridge::CvImagePtr cv_ptr;
+  try {
+    // CUTOMIZATION
+    cv_ptr = cv_bridge::toCvCopy(img, img->encoding);
+  } catch (cv_bridge::Exception& e) {
+    ROS_ERROR("cv_bridge exception: %s", e.what());
+    return;
   }
 
+  // CUSTOMIZATION
+  // Covert Color/Gray/16bit images to float
+  std::cout << "Here[0]" << std::endl;
+  cv::Mat cv_img;
+  if (cv_ptr->encoding == "bgr8") {
+    cv::cvtColor(cv_ptr->image, cv_img, CV_BGR2GRAY);
+    cv_img.convertTo(cv_img, CV_32FC1);
+  } else if (cv_ptr->encoding == "rgb8") {
+    cv::cvtColor(cv_ptr->image, cv_img, CV_RGB2GRAY);
+    cv_img.convertTo(cv_img, CV_32FC1);
+  } else
+    cv_ptr->image.convertTo(cv_img, CV_32FC1);
+
+  std::cout << "Here[1]" << std::endl;
+  // Image Resize
+  if (resize_input_image_)
+    cv::resize(cv_img, cv_img, cv::Size(), resize_factor_, resize_factor_);
+
+  std::cout << "Here[2]" << std::endl;
+  // use CLAHE to histogram Equalize 8-bit intensity Images
+  if (histogram_equalize_8bit_images_) {
+    // Check if input image is actually 8-bit
+    double imgMin, imgMax;
+    cv::minMaxLoc(cv_img, &imgMin, &imgMax);
+    if (imgMax <= 255.0) {
+      cv::Mat inImg, outImg;
+      cv_img.convertTo(inImg, CV_8UC1);
+      clahe->apply(inImg, outImg);
+      outImg.convertTo(cv_img, CV_32FC1);
+    } else
+      ROS_WARN_THROTTLE(5,
+                        "Histogram Equaliztion for 8-bit intensity images is "
+                        "turned on but input Image is not 8-bit");
+  }
+  //CUSTOMIZATION
+
+  std::cout << "Here[3]" << std::endl;
+  if(init_state_.isInitialized() && !cv_img.empty()){
+    double msgTime = img->header.stamp.toSec();
+    if(msgTime != imgUpdateMeas_.template get<mtImgMeas::_aux>().imgTime_){
+      for(int i=0;i<mtState::nCam_;i++){
+        if(imgUpdateMeas_.template get<mtImgMeas::_aux>().isValidPyr_[i]){
+          std::cout << "    \033[31mFailed Synchronization of Camera Frames, t = " << msgTime << "\033[0m" << std::endl;
+        }
+      }
+      imgUpdateMeas_.template get<mtImgMeas::_aux>().reset(msgTime);
+    }
+    imgUpdateMeas_.template get<mtImgMeas::_aux>().pyr_[camID].computeFromImage(cv_img,true);
+    imgUpdateMeas_.template get<mtImgMeas::_aux>().isValidPyr_[camID] = true;
+
+    if(imgUpdateMeas_.template get<mtImgMeas::_aux>().areAllValid()){
+      mpFilter_->template addUpdateMeas<0>(imgUpdateMeas_,msgTime);
+      imgUpdateMeas_.template get<mtImgMeas::_aux>().reset(msgTime);
+      updateAndPublish();
+    }
+  }
+  std::cout << "Here[4]" << std::endl;
+}
   /** \brief Callback for external groundtruth as TransformStamped
    *
    *  @param transform - Groundtruth message.
@@ -552,14 +606,12 @@ class RovioNode{
   void groundtruthCallback(const geometry_msgs::TransformStamped::ConstPtr& transform){
     std::lock_guard<std::mutex> lock(m_filter_);
     if(init_state_.isInitialized()){
-      std::cout << "groundtruthCallback1" << std::endl;
       Eigen::Vector3d JrJV(transform->transform.translation.x,transform->transform.translation.y,transform->transform.translation.z);
       poseUpdateMeas_.pos() = JrJV;
       QPD qJV(transform->transform.rotation.w,transform->transform.rotation.x,transform->transform.rotation.y,transform->transform.rotation.z);
       poseUpdateMeas_.att() = qJV.inverted();
       mpFilter_->template addUpdateMeas<1>(poseUpdateMeas_,transform->header.stamp.toSec()+mpPoseUpdate_->timeOffset_);
       updateAndPublish();
-      std::cout << "groundtruthCallback2" << std::endl;
     }
   }
 
