@@ -444,6 +444,7 @@ class RovioNode{
     predictionMeas_.template get<mtPredictionMeas::_gyr>() = Eigen::Vector3d(imu_msg->angular_velocity.x,imu_msg->angular_velocity.y,imu_msg->angular_velocity.z);
     if(init_state_.isInitialized()){
       mpFilter_->addPredictionMeas(predictionMeas_,imu_msg->header.stamp.toSec());
+      // tung std::cout << "IMU updating ..." << std::endl;
       updateAndPublish();
     } else {
       switch(init_state_.state_) {
@@ -524,8 +525,9 @@ class RovioNode{
     }
 
 
+    double kCamOffset = 0.01215371276812396;
     if(init_state_.isInitialized() && !cv_img.empty()){
-      double msgTime = img->header.stamp.toSec();
+      double msgTime = img->header.stamp.toSec() + kCamOffset;
       if(msgTime != imgUpdateMeas_.template get<mtImgMeas::_aux>().imgTime_){
         for(int i=0;i<mtState::nCam_;i++){
           if(imgUpdateMeas_.template get<mtImgMeas::_aux>().isValidPyr_[i]){
@@ -540,6 +542,7 @@ class RovioNode{
       if(imgUpdateMeas_.template get<mtImgMeas::_aux>().areAllValid()){
         mpFilter_->template addUpdateMeas<0>(imgUpdateMeas_,msgTime);
         imgUpdateMeas_.template get<mtImgMeas::_aux>().reset(msgTime);
+        // tung std::cout << "Camera updating ..." << std::endl;
         updateAndPublish();
       }
     }
@@ -552,14 +555,15 @@ class RovioNode{
   void groundtruthCallback(const geometry_msgs::TransformStamped::ConstPtr& transform){
     std::lock_guard<std::mutex> lock(m_filter_);
     if(init_state_.isInitialized()){
-      std::cout << "groundtruthCallback1" << std::endl;
+      // std::cout << "groundtruthCallback1" << std::endl;
       Eigen::Vector3d JrJV(transform->transform.translation.x,transform->transform.translation.y,transform->transform.translation.z);
       poseUpdateMeas_.pos() = JrJV;
       QPD qJV(transform->transform.rotation.w,transform->transform.rotation.x,transform->transform.rotation.y,transform->transform.rotation.z);
       poseUpdateMeas_.att() = qJV.inverted();
       mpFilter_->template addUpdateMeas<1>(poseUpdateMeas_,transform->header.stamp.toSec()+mpPoseUpdate_->timeOffset_);
+      // tung std::cout << "Pose updating ..." << std::endl;
       updateAndPublish();
-      std::cout << "groundtruthCallback2" << std::endl;
+      // std::cout << "groundtruthCallback2" << std::endl;
     }
   }
 
@@ -670,7 +674,9 @@ class RovioNode{
       if(plotTiming){
         ROS_INFO_STREAM(" == Filter Update: " << (t2-t1)/cv::getTickFrequency()*1000 << " ms for processing " << c1-c2 << " images, average: " << timing_T/timing_C);
       }
+
       if(mpFilter_->safe_.t_ > oldSafeTime){ // Publish only if something changed
+        // tung std::cout << "Updating: Time mpFilter_->safe_.t_: " << mpFilter_->safe_.t_ << ", oldSafeTime: " << oldSafeTime << std::endl;
         for(int i=0;i<mtState::nCam_;i++){
           if(!mpFilter_->safe_.img_[i].empty() && mpImgUpdate_->doFrameVisualisation_){
             cv::imshow("Tracker" + std::to_string(i), mpFilter_->safe_.img_[i]);
